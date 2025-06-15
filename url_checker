@@ -1,0 +1,122 @@
+# Install required libraries (if running in Google Colab)
+!pip install --upgrade pip
+!pip install --upgrade openpyxl
+!pip install --upgrade pygsheets
+
+# Import libraries
+import pandas as pd
+import requests
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+import gspread
+import gspread_dataframe as gsdf
+
+# Authenticate Google Drive and Google Sheets
+from google.colab import auth
+auth.authenticate_user()
+
+from google.auth import default
+creds, _ = default()
+gc = gspread.authorize(creds)
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Open Google Sheet by name
+spreadsheet = gc.open("URL-Checker")
+
+# ==============================================
+# Function 1: Check links from 'form' type sheet
+# ==============================================
+
+def check_form_link(link):
+    try:
+        try:
+            response = requests.head(link, allow_redirects=True, timeout=3)
+        except:
+            response = requests.get(link, allow_redirects=True, timeout=3)
+        final_url = response.url.lower()
+
+        if "example.com" in final_url:
+            return "Valid Link"
+        elif "sampledomain.com" in final_url:
+            return "Broken Link"
+        else:
+            return f"Redirected to: {final_url}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# ==============================================
+# Function 2: Check links from 'website' type sheet
+# ==============================================
+
+def check_website_link(link):
+    try:
+        response = requests.get(link, allow_redirects=True, timeout=5)
+        final_url = response.url.lower()
+
+        if final_url == "https://www.sampledomain.com/":
+            return "Redirected to homepage (likely expired)"
+        elif "sampledomain.com/page" in final_url:
+            return "Valid Link"
+        else:
+            return f"Redirected to: {final_url}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# ==============================================
+# Generic function to process any sheet
+# ==============================================
+
+def process_sheet(sheet_name, check_function):
+    try:
+        # Open sheet (tab) by name
+        sheet = spreadsheet.worksheet(sheet_name)
+
+        # Get values from column A (first column)
+        col = sheet.col_values(1)
+
+        if len(col) <= 1:
+            print(f"Sheet '{sheet_name}' is empty. No links to process.")
+            return
+
+        # Create DataFrame with links (skip header)
+        links = col[1:]
+        df = pd.DataFrame({'link': links})
+
+        # Run link checks with multithreading
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            results = list(tqdm(
+                executor.map(check_function, df["link"]),
+                total=len(df),
+                desc=f"Checking '{sheet_name}'"
+            ))
+
+        df["result"] = results
+
+        # Report number of errors if any
+        errors = [r for r in results if str(r).startswith("Error:")]
+        if errors:
+            print(f"Sheet '{sheet_name}' had {len(errors)} errors.")
+
+        # Add header row
+        df = pd.concat(
+            [pd.DataFrame([["link", "result"]], columns=["link", "result"]), df],
+            ignore_index=True
+        )
+
+        # Clear sheet and write results back
+        sheet.clear()
+        gsdf.set_with_dataframe(sheet, df, include_index=False, include_column_header=False)
+
+        print(f"Check completed for sheet '{sheet_name}'.")
+
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Sheet '{sheet_name}' not found.")
+
+# ==============================================
+# Run the checks for both sheets
+# ==============================================
+
+process_sheet("form_links", check_form_link)
+process_sheet("website_links", check_website_link)
